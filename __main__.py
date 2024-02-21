@@ -3,15 +3,20 @@ from os import system
 from pathlib import Path
 from argparse import ArgumentParser
 from cfex import CFEX
-from time import time
+from time import time, sleep
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from watchdog.events import DirModifiedEvent, DirCreatedEvent, DirDeletedEvent, DirMovedEvent
+from threading import Thread
 
-
-def call(cmd, file=Path('temp')):
+def _call(cmd, file=Path('temp')):
     system(f'{cmd} > temp')
     return file.read_text()
+
+def call(cmd, file=Path('temp')):
+    print(f'{cmd} > temp')
+    return _call(cmd, file)
+
 
 class SSH:
     def __init__(self, configs):
@@ -23,8 +28,11 @@ class SSH:
         self.remote_dir = Path(configs['REMOTE_DIR'])
         self.local_store = self.local_dir / self.remote_dir.name
 
+    def cmd(self, cmd):
+        return _call(f'ssh -i {self.key} {self.user}@{self.host} "{cmd}"')
+
     def check(self):
-        answer = call(f'ssh -i {self.key} {self.user}@{self.host} "ls {self.remote_dir.parent}"')
+        answer = self.cmd(f'ls {self.remote_dir.parent}')
         return self.remote_dir.name in answer
 
     def download(self, path, r=False):
@@ -58,15 +66,22 @@ class EventHandler(FileSystemEventHandler):
         self.ssh = ssh
         self.ignore = configs.get('IGNORE', [])
 
+    def dispatch(self, event):
+        if self.use_cache(event) and not any([i in event.src_path for i in self.ignore]):
+            super().dispatch(event)
+
     def use_cache(self, event):
         seconds = int(time())
         if seconds > self.next_clear:
             self.file_cache = set()
             self.next_clear = seconds + 300
         key = (seconds, event)
-        if key in self.file_cache:
+        alt_key = (seconds-1, event)
+        if key in self.file_cache or alt_key in self.file_cache:
             return False
+        alt_key = (seconds+1, event)
         self.file_cache.add(key)
+        self.file_cache.add(alt_key)
         return True
 
     def get_path(self, event, attr='src_path'):
@@ -77,32 +92,28 @@ class EventHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if not isinstance(event, DirModifiedEvent):
-            if self.use_cache(event):
-                self.ssh.upload(*self.get_path(event))
+            self.ssh.upload(*self.get_path(event))
 
     def on_created(self, event):
-        if self.use_cache(event):
-            if isinstance(event, DirCreatedEvent):
-                _, dir = self.get_path(event)
-                self.ssh.create_dir(dir)
-            else:
-                _, file = self.get_path(event)
-                self.ssh.create_file(file)
+        if isinstance(event, DirCreatedEvent):
+            _, dir = self.get_path(event)
+            self.ssh.create_dir(dir)
+        else:
+            _, file = self.get_path(event)
+            self.ssh.create_file(file)
 
     def on_deleted(self, event):
-        if self.use_cache(event):
-            if isinstance(event, DirDeletedEvent):
-                _, dir = self.get_path(event)
-                self.ssh.delete_dir(dir)
-            else:
-                _, file = self.get_path(event)
-                self.ssh.delete_file(file)
+        if isinstance(event, DirDeletedEvent):
+            _, dir = self.get_path(event)
+            self.ssh.delete_dir(dir)
+        else:
+            _, file = self.get_path(event)
+            self.ssh.delete_file(file)
 
     def on_moved(self, event):
-        if self.use_cache(event):
-            _, src = self.get_path(event)
-            _, dist = self.get_path(event, 'dest_path')
-            self.ssh.move(src, dist)
+        _, src = self.get_path(event)
+        _, dist = self.get_path(event, 'dest_path')
+        self.ssh.move(src, dist)
 
 
 def load_project_config(dir_path, config_file='.colossos.cfex'):
@@ -111,6 +122,26 @@ def load_project_config(dir_path, config_file='.colossos.cfex'):
         raise Exception('This folder don\'t have a colossos project!')
     return CFEX(config_file).load()
 
+
+class Subscriber(Thread):
+    def __init__(self, *args, ssh=None, configs=None, life=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.life = life
+        self.subscribe = configs.get('SUBSCRIBE', [])
+        self.execute = configs.get('EXECUTE', [])
+        self.subscribe_update = configs.get('SUBSCRIBE_UPDATE', 1)
+        self.execute_update = configs.get('EXECUTE_UPDATE', 1)
+        self.ssh = ssh
+
+    def run(self):
+        while self.life.is_alive():
+            if int(time()) % self.subscribe_update == 0:
+                for file in self.subscribe:
+                    self.ssh.download(self.ssh.remote_dir / file)
+            if int(time()) % self.execute_update == 0:
+                for cmd in self.execute:
+                    print(self.ssh.cmd(cmd))
+            sleep(1)
 
 
 if __name__ == "__main__":
@@ -132,6 +163,13 @@ if __name__ == "__main__":
 
     observer = Observer()
     event = EventHandler(ssh, CONFIGS)
+    
     observer.schedule(event, ssh.local_store, recursive=True)
-    observer.start()
+    threads = [observer]
+
+    if len(CONFIGS.get('SUBSCRIBE', [])) > 0 or len(CONFIGS.get('EXECUTE', [])) > 0:
+        threads.append(Subscriber(ssh=ssh, configs=CONFIGS, life=observer))
+
+    for thread in threads:
+        thread.start()
     observer.join()
