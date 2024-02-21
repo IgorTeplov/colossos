@@ -2,16 +2,18 @@ from sys import argv
 from os import system
 from pathlib import Path
 from argparse import ArgumentParser
-from cfex import CFEX
+from .cfex import CFEX
 from time import time, sleep
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from watchdog.events import DirModifiedEvent, DirCreatedEvent, DirDeletedEvent, DirMovedEvent
+from watchdog.events import DirModifiedEvent, DirCreatedEvent, DirDeletedEvent
 from threading import Thread
+
 
 def _call(cmd, file=Path('temp')):
     system(f'{cmd} > temp')
     return file.read_text()
+
 
 def call(cmd, file=Path('temp')):
     print(f'{cmd} > temp')
@@ -24,9 +26,13 @@ class SSH:
         self.user = configs['SSH_USER']
         self.host = configs['SSH_HOST']
 
-        self.local_dir = Path(configs['LOCAL_DIR'].replace('~', str(Path.home())))
+        self.local_dir = Path(
+            configs['LOCAL_DIR'].replace('~', str(Path.home())))
+        self.src_dir = Path(configs.get('SRC_DIR', None))
         self.remote_dir = Path(configs['REMOTE_DIR'])
-        self.local_store = self.local_dir / self.remote_dir.name
+        if self.src_dir is None:
+            self.src_dir = self.remote_dir
+        self.local_store = self.local_dir / self.src_dir.name
 
     def cmd(self, cmd):
         return _call(f'ssh -i {self.key} {self.user}@{self.host} "{cmd}"')
@@ -37,7 +43,8 @@ class SSH:
 
     def download(self, path, r=False):
         r_flag = '-r' if r else ''
-        call(f'scp -i {self.key} {r_flag} {self.user}@{self.host}:{path} {self.local_dir}')
+        call(f'scp -i {self.key} {r_flag} {self.user}\
+            @{self.host}:{path} {self.local_dir}')
 
     def upload(self, _from, _to):
         call(f'scp -i {self.key} {_from} {self.user}@{self.host}:{_to}')
@@ -60,14 +67,16 @@ class SSH:
 
 class EventHandler(FileSystemEventHandler):
     file_cache = set()
-    next_clear = time()+300
+    next_clear = time() + 300
 
     def __init__(self, ssh, configs):
         self.ssh = ssh
         self.ignore = configs.get('IGNORE', [])
 
     def dispatch(self, event):
-        if self.use_cache(event) and not any([i in event.src_path for i in self.ignore]):
+        if self.use_cache(event) and not any(
+            [i in event.src_path for i in self.ignore]
+        ):
             super().dispatch(event)
 
     def use_cache(self, event):
@@ -76,17 +85,18 @@ class EventHandler(FileSystemEventHandler):
             self.file_cache = set()
             self.next_clear = seconds + 300
         key = (seconds, event)
-        alt_key = (seconds-1, event)
+        alt_key = (seconds - 1, event)
         if key in self.file_cache or alt_key in self.file_cache:
             return False
-        alt_key = (seconds+1, event)
+        alt_key = (seconds + 1, event)
         self.file_cache.add(key)
         self.file_cache.add(alt_key)
         return True
 
     def get_path(self, event, attr='src_path'):
         absolute_path = Path(getattr(event, attr))
-        relative_path = getattr(event, attr).replace(str(ssh.local_store)+'/', '')
+        relative_path = getattr(event, attr).replace(
+            str(ssh.local_store) + '/', '')
         dist_path = ssh.remote_dir / relative_path
         return absolute_path, dist_path
 
@@ -146,10 +156,12 @@ class Subscriber(Thread):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("-d", "--dir", required=True, help="directory for sync")
-    parser.add_argument("-s", "--sync", default=False, action='store_true', help="sync remote directory")
+    parser.add_argument("-d", "--dir", required=True,
+                        help="directory for sync")
+    parser.add_argument("-s", "--sync", default=False,
+                        action='store_true', help="sync remote directory")
     args = parser.parse_args(argv[1:])
-    
+
     dir_path = Path(args.dir)
     CONFIGS = load_project_config(dir_path)
 
@@ -163,11 +175,14 @@ if __name__ == "__main__":
 
     observer = Observer()
     event = EventHandler(ssh, CONFIGS)
-    
+
     observer.schedule(event, ssh.local_store, recursive=True)
     threads = [observer]
 
-    if len(CONFIGS.get('SUBSCRIBE', [])) > 0 or len(CONFIGS.get('EXECUTE', [])) > 0:
+    subscribe_len = len(CONFIGS.get('SUBSCRIBE', []))
+    execute_len = len(CONFIGS.get('EXECUTE', []))
+
+    if subscribe_len > 0 or execute_len > 0:
         threads.append(Subscriber(ssh=ssh, configs=CONFIGS, life=observer))
 
     for thread in threads:
