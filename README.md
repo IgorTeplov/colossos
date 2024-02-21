@@ -6,10 +6,13 @@
 4. Заповнити цей файл наступним шаблоном:
 
 SSH_KEY = /path/to/your/ssh/key
+
 SSH_USER = root
+
 SSH_HOST = 127.0.0.1
 
 LOCAL_DIR = /path/to/your/dir/with/this/file
+
 REMOTE_DIR = /path/to/dir/that/need/sunc/on/server
 
 5. Синхронізувати папки командою
